@@ -9,6 +9,8 @@ extern crate console_error_panic_hook;
 
 #[cfg(test)]
 mod examples_tests;
+#[cfg(test)]
+mod quoted_property_tests;
 
 /// The identifier for the unique source.
 const INPUT: &str = "file:///main.oal";
