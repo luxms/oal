@@ -112,6 +112,15 @@ After a parameter, `~` and `->` retain their OAL operator meaning, and the token
 `%6Fn` if those sequences are intended as literal suffixes. A literal `/` starts
 another segment; `%2F` remains part of the current segment.
 
+### YAML output
+
+The CLI and WASM compiler use the same YAML emitter. Unicode NEL (U+0085),
+LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR (U+2029) are escaped in keys
+and values so YAML 1.1 and 1.2 readers do not fold them or add indentation to
+their contents. Multiline strings are quoted without automatic line wrapping.
+This changes presentation, not the OpenAPI data model or compilation interfaces.
+OAL annotations and CLI base files still use the existing parser.
+
 ## Experimental: WebAssembly support
 Release to WebAssembly requires the installation of [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/).
 
