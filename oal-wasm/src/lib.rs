@@ -211,3 +211,6 @@ mod security_tests;
 
 #[cfg(test)]
 mod base_document_tests;
+
+#[cfg(test)]
+mod mixed_uri_tests;
