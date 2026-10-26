@@ -27,6 +27,9 @@ pub enum TokenKind {
     PathElementRoot,
     #[regex("/[0-9a-zA-Z%~_.-]+")]
     PathElementSegment,
+    // Produced contextually after a URI parameter, without a new slash.
+    PathElementSuffix,
+    PathVariableSuffix,
     #[token("get")]
     MethodGet,
     #[token("put")]
@@ -70,6 +73,7 @@ pub enum TokenKind {
     #[regex("[1-5]XX")]
     LiteralHttpStatus,
     #[regex("'[0-9a-zA-Z$@_-]+")]
+    #[regex(r#"'"([^"\\\x00-\x1f]|\\[^\r\n])*""#)]
     Property,
     #[token("{")]
     ControlBraceLeft,
@@ -177,7 +181,9 @@ impl TokenKind {
     pub fn is_path_element(&self) -> bool {
         matches!(
             self,
-            TokenKind::PathElementRoot | TokenKind::PathElementSegment
+            TokenKind::PathElementRoot
+                | TokenKind::PathElementSegment
+                | TokenKind::PathElementSuffix
         )
     }
     pub fn is_method(&self) -> bool {
@@ -321,13 +327,73 @@ fn test_prefixed_string() {
 
 /// Parses a string of characters, yields a list of tokens and/or errors.
 pub fn tokenize(loc: Locator, input: &str) -> (Option<TokenList<Token>>, Vec<ParserError>) {
-    let lexer = TokenKind::lexer(input).spanned();
+    let mut lexer = TokenKind::lexer(input);
     let mut list = TokenList::new(loc.clone());
     let mut errors = Vec::new();
+    let mut path: Option<(usize, bool)> = None;
+    let mut brace_depth = 0_usize;
+    let mut uri_variables = Vec::new();
 
-    for (result, range) in lexer {
+    loop {
+        let offset = lexer.span().end;
+        let remainder = lexer.remainder();
+        // Keep operators and the relation keyword as boundaries. Only adjacent
+        // fragments join a segment; whitespace still separates OAL expressions.
+        let relation = remainder.strip_prefix("on").is_some_and(|rest| {
+            !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || "$_-".contains(c))
+        });
+        let suffix_len = if path.is_some_and(|(end, _)| end == offset)
+            && !remainder.starts_with("->")
+            && !relation
+        {
+            remainder
+                .bytes()
+                .take_while(|c| c.is_ascii_alphanumeric() || b"%_.-".contains(c))
+                .count()
+        } else {
+            0
+        };
+        if suffix_len > 0 {
+            lexer.bump(suffix_len);
+            let end = offset + suffix_len;
+            let value = TokenValue::Symbol(list.register(&input[offset..end]));
+            list.push(Token(TokenKind::PathElementSuffix, value), offset..end);
+            path = Some((end, false));
+            continue;
+        }
+        let variable = path
+            .filter(|(end, root)| *root || *end == offset)
+            .filter(|_| remainder.starts_with('{'));
+        let Some(result) = lexer.next() else { break };
+        let range = lexer.span();
         match result {
-            Ok(kind) => {
+            Ok(mut kind) => {
+                match kind {
+                    TokenKind::PathElementRoot | TokenKind::PathElementSegment => {
+                        path = Some((range.end, kind == TokenKind::PathElementRoot));
+                    }
+                    TokenKind::ControlBraceLeft => {
+                        brace_depth += 1;
+                        if let Some((_, root)) = variable {
+                            uri_variables.push(brace_depth);
+                            if !root {
+                                kind = TokenKind::PathVariableSuffix;
+                            }
+                        }
+                        path = None;
+                    }
+                    TokenKind::ControlBraceRight => {
+                        path = if uri_variables.last() == Some(&brace_depth) {
+                            uri_variables.pop();
+                            Some((range.end, false))
+                        } else {
+                            None
+                        };
+                        brace_depth = brace_depth.saturating_sub(1);
+                    }
+                    _ if kind.is_trivia() && path.is_some_and(|(_, root)| root) => {}
+                    _ => path = None,
+                }
                 let slice = &input[range.clone()];
                 let value = match kind {
                     TokenKind::LiteralNumber => TokenValue::Number(parse_number(slice)),
@@ -349,7 +415,19 @@ pub fn tokenize(loc: Locator, input: &str) -> (Option<TokenList<Token>>, Vec<Par
                         TokenValue::Symbol(list.register(parse_prefixed_string(slice)))
                     }
                     TokenKind::Property => {
-                        TokenValue::Symbol(list.register(parse_prefixed_string(slice)))
+                        let name = parse_prefixed_string(slice);
+                        if name.starts_with('"') {
+                            // JSON decoding also validates escapes and surrogate pairs.
+                            match serde_json::from_str::<String>(name) {
+                                Ok(name) => TokenValue::Symbol(list.register(&name)),
+                                Err(_) => {
+                                    errors.push(ParserError::new(Span::new(loc.clone(), range)));
+                                    continue;
+                                }
+                            }
+                        } else {
+                            TokenValue::Symbol(list.register(name))
+                        }
                     }
                     TokenKind::CommentBlock | TokenKind::CommentLine | TokenKind::Space => {
                         TokenValue::Symbol(list.register(slice))
@@ -360,6 +438,7 @@ pub fn tokenize(loc: Locator, input: &str) -> (Option<TokenList<Token>>, Vec<Par
                 list.push(token, range);
             }
             Err(_) => {
+                path = None;
                 let span = Span::new(loc.clone(), range);
                 errors.push(ParserError::new(span));
             }
@@ -380,4 +459,81 @@ fn test_tokenize() {
 
     assert!(errors.is_empty());
     assert_eq!(list.end(), input.len());
+}
+
+#[test]
+fn tokenize_mixed_segments_only_reclassifies_adjacent_fragments() {
+    let input = "/v{'id int}.json/{'name str}get/{'n int}123456789012345678901234567890";
+    let (list, errors) = tokenize(Locator::try_from("file:///test.oal").unwrap(), input);
+    assert!(errors.is_empty());
+    let list = list.unwrap();
+    let mut cursor = list.head();
+    let mut suffixes = Vec::new();
+    while cursor.is_valid() {
+        let (token, span) = list.token_span(cursor);
+        if token.kind() == TokenKind::PathElementSuffix {
+            let text = token.value().as_str(&list);
+            assert_eq!(text, &input[span.range()]);
+            suffixes.push(text);
+        }
+        cursor = list.advance(cursor);
+    }
+    assert_eq!(suffixes, [".json", "get", "123456789012345678901234567890"]);
+}
+
+#[test]
+fn uri_fragment_state_does_not_escape_nested_braces_or_comments() {
+    let input = "/v{f {'value \"}\", 'nested /x/{'id int}.json}}.txt /* { */ mod.name ~ str -> int";
+    let (list, errors) = tokenize(Locator::try_from("file:///test.oal").unwrap(), input);
+    assert!(errors.is_empty());
+    let list = list.unwrap();
+    let mut cursor = list.head();
+    let mut suffixes = Vec::new();
+    let mut dots = 0;
+    while cursor.is_valid() {
+        let token = list.reference(cursor);
+        if token.kind() == TokenKind::PathElementSuffix {
+            suffixes.push(token.value().as_str(&list));
+        }
+        if token.kind() == TokenKind::ControlFullStop {
+            dots += 1;
+        }
+        cursor = list.advance(cursor);
+    }
+    assert_eq!(suffixes, [".json", ".txt"]);
+    assert_eq!(dots, 1);
+}
+
+#[test]
+fn test_quoted_property_tokens() {
+    for input in [
+        r#"'"user.name""#,
+        r#"'"display name""#,
+        r#"'"quote\"\\\n\u263a""#,
+        r#"'"""#,
+    ] {
+        let loc = Locator::try_from("file:///quoted.oal").unwrap();
+        let (list, errors) = tokenize(loc, input);
+        assert!(errors.is_empty(), "{input}");
+        assert_eq!(list.unwrap().end(), input.len());
+        let mut lexer = TokenKind::lexer(input);
+        assert_eq!(lexer.next(), Some(Ok(TokenKind::Property)));
+        assert_eq!(lexer.next(), None);
+    }
+}
+
+#[test]
+fn test_invalid_quoted_property_tokens() {
+    for input in [
+        r#"'"unterminated"#,
+        r#"'"\q""#,
+        r#"'"\uZZZZ""#,
+        r#"'"\ud800""#,
+        r#"'"\udc00""#,
+        "'\"raw\nnewline\"",
+    ] {
+        let loc = Locator::try_from("file:///quoted.oal").unwrap();
+        let (_, errors) = tokenize(loc, input);
+        assert!(!errors.is_empty(), "{input}");
+    }
 }
