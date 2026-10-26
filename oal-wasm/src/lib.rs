@@ -207,4 +207,7 @@ fn test_compile_error() {
 }
 
 #[cfg(test)]
+mod security_tests;
+
+#[cfg(test)]
 mod base_document_tests;
