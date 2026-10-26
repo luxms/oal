@@ -9,6 +9,8 @@ extern crate console_error_panic_hook;
 
 #[cfg(test)]
 mod examples_tests;
+#[cfg(test)]
+mod yaml_tests;
 
 /// The identifier for the unique source.
 const INPUT: &str = "file:///main.oal";
@@ -89,7 +91,7 @@ fn process(input: &str) -> anyhow::Result<String> {
     let spec = oal_compiler::eval::eval(&mods)?;
     let builder = oal_openapi::Builder::new(spec);
     let api = builder.into_openapi();
-    let api_yaml = serde_yaml::to_string(&api)?;
+    let api_yaml = oal_openapi::to_yaml(&api)?;
     Ok(api_yaml)
 }
 
