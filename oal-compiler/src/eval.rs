@@ -304,6 +304,9 @@ pub fn eval_transfer<'a>(
     let summary = ann.get_string("summary");
     let tags = ann.get_enum("tags").unwrap_or_default();
     let id = ann.get_string("operationId");
+    let security = ann
+        .get_security()
+        .map_err(|err| err.at(transfer.node().span()))?;
 
     let mut methods = EnumMap::default();
     for m in transfer.methods() {
@@ -331,6 +334,7 @@ pub fn eval_transfer<'a>(
         summary,
         tags,
         id,
+        security,
     };
 
     let expr = Expr::Transfer(Box::new(xfer));
@@ -405,6 +409,21 @@ pub fn eval_uri_template<'a>(
                 let p = cast_property(eval_any(ctx, var.inner(), AnnRef::default())?);
                 let s = UriSegment::Variable(Box::new(p));
                 path.push(s);
+            }
+            syn::UriSegment::Compound(compound) => {
+                let mut parts = Vec::new();
+                for part in compound.parts() {
+                    parts.push(match part {
+                        syn::UriPart::Element(elem) => {
+                            crate::spec::UriPart::Literal(elem.as_str().into())
+                        }
+                        syn::UriPart::Variable(var) => {
+                            let p = cast_property(eval_any(ctx, var.inner(), AnnRef::default())?);
+                            crate::spec::UriPart::Variable(Box::new(p))
+                        }
+                    });
+                }
+                path.push(UriSegment::Compound(parts));
             }
         }
     }

@@ -83,9 +83,118 @@ mapping on the content suppresses that fallback. Malformed entries, YAML tags,
 non-finite numbers and non-string object keys produce diagnostics instead of
 silently losing example data. Inline values must be representable as JSON.
 
+## Mixed URI Segments
+
+URI segments can combine literal text and typed parameters:
+
+```oal
+res /api/db/{'dataset str}.{'table str} on get -> {};
+res /v{'version int}/files/{'name str}.json on get -> {};
+
+let id = 'id int;
+res /items/item-{id} on get -> {};
+```
+
+These produce `/api/db/{dataset}.{table}`, `/v{version}/files/{name}.json`
+and `/items/item-{id}` without post-processing. Every parameter still has its
+own required OpenAPI path-parameter declaration and primitive type. Literal
+prefixes/suffixes, multiple parameters, URI `concat`, query parameters, URI
+schema examples and generated operation IDs use the same segment structure.
+
+Fragments within a segment must be adjacent; whitespace and comments are still
+allowed inside parameter braces. Existing slash-separated syntax, including
+whitespace between `/` and its parameter braces, is retained. Literal fragments
+use ASCII letters/digits, `_`, `-`, `.`, and percent-encoded data, which is
+preserved verbatim. Encode reserved literal braces as `%7B`/`%7D` and Unicode
+as UTF-8 percent escapes; the compiler does not decode or validate those escapes.
+After a parameter, `~` and `->` retain their OAL operator meaning, and the token
+`on` still begins a relation even without whitespace. Use `%7E`, `%2D%3E` or
+`%6Fn` if those sequences are intended as literal suffixes. A literal `/` starts
+another segment; `%2F` remains part of the current segment.
+
 ## Experimental: WebAssembly support
 Release to WebAssembly requires the installation of [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/).
 
 ```
 make wasm
 ```
+
+## Operation Security
+
+Declare OpenAPI security requirements on a transfer:
+
+```oal
+# security: [{api_key: []}, {oauth: [read, write]}]
+let protected = get -> {};
+res /items on protected;
+
+# security: []
+let public = get -> {};
+res /health on public;
+```
+
+Requirements in the array are alternatives (OR). Schemes within one requirement
+are all required (AND), for example `security: [{api_key: [], oauth: [read]}]`.
+An empty requirement permits anonymous access: `security: [{}, {oauth: [read]}]`.
+Omitting the annotation inherits document-level security; `security: []`
+explicitly disables it for the operation. A later security annotation replaces
+earlier requirements rather than concatenating alternatives, including when
+the later annotation is empty.
+
+Scheme names and scopes must be strings, with a scope array for every scheme.
+Malformed values produce diagnostics; YAML-only tags are rejected. Use empty
+scope arrays for schemes without OAuth/OpenID scopes. Scheme definitions remain
+in `components.securitySchemes` of the CLI's base OpenAPI document; this feature
+does not add scheme declarations to OAL or a base-document argument to WASM.
+References and scopes are emitted as supplied, not checked against that base.
+These annotations describe authentication requirements; they do not enforce it.
+
+### Base document input
+
+The historic JavaScript `compile(oalText)` function is unchanged. A separate
+WASM entry point accepts two JSON-compatible objects:
+
+```js
+const result = compileDocument(
+  { source: "res /items on get -> {};" },
+  {
+    openapi: "3.0.3",
+    info: { title: "Items API", version: "1.0.0" },
+    paths: {},
+    components: {
+      securitySchemes: {
+        bearer: { type: "http", scheme: "bearer" }
+      }
+    },
+    security: [{ bearer: [] }]
+  }
+);
+try {
+  if (result.error) throw new Error(result.error);
+  console.log(result.api);
+} finally {
+  result.free();
+}
+```
+
+Both arguments are required. The first must contain only the string `source`;
+the second is a full OpenAPI 3.0 base document, not a partial patch or YAML text.
+The required fields include `openapi`, `info.title`, `info.version`, and `paths`.
+Malformed objects or OAL return the existing `{api: "", error: "..."}` result.
+Inputs are serialized with JSON semantics and are not modified. Cyclic objects
+and serialization errors produce diagnostics. Use ordinary JSON-compatible data,
+not functions, BigInts, custom getters or `toJSON` implementations.
+
+The existing CLI builder defines ownership: generated `paths` and
+`components.schemas` **replace** those entire base collections. Other metadata,
+document security, non-schema components and supported `x-` extensions are
+retained through the typed OpenAPI model. This is not a deep merge and does not
+preserve arbitrary unknown fields or original formatting; normal serialization
+defaults may appear. A supplied base does not inherit the default title/server.
+Reference resolution and complete OpenAPI semantic validation are not performed.
+
+Rust callers retain `oal_wasm::compile(input: &str)` and can also call
+`oal_wasm::compile_with_document(input: &str, base: oal_wasm::OpenAPI)`.
+The CLI and its `--base` interface are unchanged. The new WASM entry point uses
+the same builder without appending YAML fragments. Always deploy the generated
+JavaScript bindings together with the matching WASM binary.
