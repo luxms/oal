@@ -218,6 +218,9 @@ impl From<Schema> for Content {
 
 pub type Ranges = IndexMap<(Option<atom::HttpStatus>, Option<MediaType>), Content>;
 
+/// Schemes within a requirement are ANDed; the list of requirements is ORed.
+pub type SecurityRequirement = IndexMap<String, Vec<String>>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transfer {
     pub methods: EnumMap<atom::Method, bool>,
@@ -228,6 +231,7 @@ pub struct Transfer {
     pub summary: Option<String>,
     pub tags: Vec<String>,
     pub id: Option<String>,
+    pub security: Option<Vec<SecurityRequirement>>,
 }
 
 pub type Transfers = EnumMap<atom::Method, Option<Transfer>>;
